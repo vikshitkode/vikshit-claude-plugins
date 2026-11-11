@@ -1,0 +1,14 @@
+{
+  "name": "vikshit-claude-plugins",
+  "description": "Claude Code plugins by vikshitkode",
+  "owner": {
+    "name": "vikshitkode"
+  },
+  "plugins": [
+    {
+      "name": "prompt-spell-check",
+      "source": "./prompt-spell-check",
+      "description": "Underlines misspelled words in the prompt box and fixes sure typos as you type, using the macOS spell checker"
+    }
+  ]
+}
