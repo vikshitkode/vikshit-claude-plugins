@@ -1,6 +1,14 @@
 import type { PromptBox, PromptDecoration } from 'claude-code'
 
-export type Verdict = { kind: 'ok' } | { kind: 'misspelled'; fix: string | null }
+export type Verdict =
+  | { kind: 'ok' }
+  | {
+      kind: 'misspelled'
+      /** The guess the mod types by itself; null when none is sure. */
+      fix: string | null
+      /** macOS's guesses, best first. */
+      guesses: readonly string[]
+    }
 
 export type Lexicon = {
   verdicts: ReadonlyMap<string, Verdict>
@@ -21,6 +29,17 @@ export type Word = {
 export type Fix = { start: number; original: string; fixed: string }
 
 export type Range = { start: number; end: number }
+
+/**
+ * One word the person is stepping through its guesses. `index` is the guess
+ * the box shows now; -1 while it shows what they typed.
+ */
+export type Cycle = {
+  start: number
+  original: string
+  guesses: readonly string[]
+  index: number
+}
 
 // An unclosed backtick guards the rest of its line: the person is mid-code.
 const CODE = /```[\s\S]*?(?:```|$)|`[^`\n]*(?:`|$)/gm
@@ -135,6 +154,59 @@ export const applyFix = (
 export const undoFix = (box: PromptBox, fix: Fix): PromptBox =>
   swap(box, fix.start, fix.fixed, fix.original)
 
+const shownWord = (cycle: Cycle): string =>
+  cycle.guesses[cycle.index] ?? cycle.original
+
+/**
+ * The word the next step changes: the one already being stepped while the box
+ * still shows it, else the underlined word nearest before the cursor, else
+ * the first one after it. Null when no underlined word has a guess.
+ */
+export const cycleTarget = (
+  box: PromptBox,
+  words: readonly Word[],
+  lexicon: Lexicon,
+  current: Cycle | null,
+): Cycle | null => {
+  if (current && box.text.startsWith(shownWord(current), current.start)) {
+    return current
+  }
+
+  const open = words.flatMap((word): Cycle[] => {
+    const verdict = verdictOf(word, lexicon)
+    const isOpen =
+      word.isComplete &&
+      verdict?.kind === 'misspelled' &&
+      verdict.guesses.length > 0
+
+    return isOpen
+      ? [{ start: word.start, original: word.text, guesses: verdict.guesses, index: -1 }]
+      : []
+  })
+
+  return (
+    open.findLast(
+      cycle => cycle.start + cycle.original.length <= box.cursor,
+    ) ??
+    open[0] ??
+    null
+  )
+}
+
+/** Shows the next guess in the box; after the last, what the person typed. */
+export const advance = (
+  box: PromptBox,
+  cycle: Cycle,
+): { box: PromptBox; cycle: Cycle } => {
+  const index = cycle.index + 1 < cycle.guesses.length ? cycle.index + 1 : -1
+  const next = { ...cycle, index }
+
+  return {
+    box: swap(box, cycle.start, shownWord(cycle), shownWord(next)),
+    cycle: next,
+  }
+}
+
 const swap = (
   box: PromptBox,
   start: number,
@@ -169,7 +241,7 @@ const isSwap = (word: string, fixed: string): boolean => {
  * (`aceive` is `active` or `achieve`) and is left underlined.
  */
 const sureFix = (word: string, guesses: readonly string[]): string | null => {
-  const [first, second] = guesses.filter(guess => guess !== '')
+  const [first, second] = guesses
   if (first === undefined) return null
 
   return second === undefined || isSwap(word, first) ? first : null
@@ -182,7 +254,9 @@ export const parseVerdicts = (stdout: string): [string, Verdict][] =>
     if (!word) return []
     if (state === 'ok') return [[word, { kind: 'ok' }]]
     if (state === 'bad') {
-      return [[word, { kind: 'misspelled', fix: sureFix(word, guesses) }]]
+      const real = guesses.filter(guess => guess !== '')
+
+      return [[word, { kind: 'misspelled', fix: sureFix(word, real), guesses: real }]]
     }
 
     return []

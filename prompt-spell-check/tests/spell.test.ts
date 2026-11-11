@@ -1,8 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { On, PromptEditInput, PromptEditResult } from 'claude-code'
+import type { On, PromptBox, PromptEditInput, PromptEditResult } from 'claude-code'
 
-import { parseVerdicts, proseWords } from '../hooks/spell'
+import { advance, cycleTarget, parseVerdicts, proseWords } from '../hooks/spell'
+import type { Lexicon } from '../hooks/spell'
 
 // What the helper answers: `bad`, then macOS's guesses, best first.
 const HELPER: Record<string, string> = {
@@ -19,6 +20,8 @@ type Stored = Record<string, unknown>
 const engine = (on: On, hasHelper = true) => {
   const stored: Stored = {}
   const spawned: string[][] = []
+  // The box as the editor holds it: a test sets it to what an edit answered.
+  const screen: { box: PromptBox } = { box: { text: '', cursor: 0 } }
   on('command.register', () => ({ value: { command: 'prompt-spell-check' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('fs.exists', () => ({ value: hasHelper }))
@@ -29,7 +32,12 @@ const engine = (on: On, hasHelper = true) => {
     return { value: undefined }
   })
   on('ui.toast', () => ({ value: undefined }))
-  on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
+  on('prompt.read', () => ({ value: screen.box }))
+  on('prompt.fill', (_, e) => {
+    screen.box = { text: e.text, cursor: e.cursor ?? e.text.length }
+
+    return { isFilled: true }
+  })
   on('prompt.paint', () => ({
     value: { isPainted: true, text: '', cursor: 0 },
   }))
@@ -50,12 +58,16 @@ const engine = (on: On, hasHelper = true) => {
       },
     }
   })
-  on('prompt.edit', (_, e) => ({
-    text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end),
-    cursor: e.start + e.inputText.length,
-  }))
+  on('prompt.edit', (_, e) => {
+    screen.box = {
+      text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end),
+      cursor: e.start + e.inputText.length,
+    }
 
-  return { stored, spawned }
+    return screen.box
+  })
+
+  return { stored, spawned, screen }
 }
 
 // The engine raises `prompt.edit` on the test's `$`, but this build's typings
@@ -292,4 +304,129 @@ test('the helper is built once when it is missing', async ($, on) => {
   await edit($, type('acheive', ' '))
 
   expect(spawned.some(argv => argv[0] === 'swiftc')).toBe(true)
+})
+
+const BAND = {
+  plugin: 'prompt-spell-check',
+  component: 'AbovePrompt',
+  surface: 'terminal',
+  props: {
+    hasSurvey: false,
+    isCollapsed: false,
+    isWorking: false,
+    maxRows: 20,
+    bodyColumns: 80,
+    scroll: { offset: 0, bodyRows: 20 },
+    view: {},
+  },
+} as const
+
+const lexiconOf = (lines: string[]): Lexicon => ({
+  verdicts: new Map(parseVerdicts(lines.join('\n'))),
+  ignored: new Set(),
+})
+
+test('the helper\'s guesses are kept with the verdict', () => {
+  expect(parseVerdicts('aceive\tbad\tactive\tachieve\nasdfgh\tbad\t')).toEqual([
+    ['aceive', { kind: 'misspelled', fix: null, guesses: ['active', 'achieve'] }],
+    ['asdfgh', { kind: 'misspelled', fix: null, guesses: [] }],
+  ])
+})
+
+test('the word to step is the underlined one nearest before the cursor', () => {
+  const lexicon = lexiconOf([
+    'tets\tbad\tlets\ttest',
+    'aceive\tbad\tactive\tachieve',
+    'asdfgh\tbad\t',
+  ])
+  const text = 'run tets to aceive asdfgh now '
+  const at = (cursor: number) =>
+    cycleTarget({ text, cursor }, proseWords({ text, cursor }), lexicon, null)
+
+  expect(at(text.length)?.original).toBe('aceive')
+  expect(at(9)?.original).toBe('tets')
+  expect(at(0)?.original).toBe('tets')
+  expect(at(text.length)).toEqual({
+    start: 12,
+    original: 'aceive',
+    guesses: ['active', 'achieve'],
+    index: -1,
+  })
+})
+
+test('a word with no guesses is never the word to step', () => {
+  const text = 'run asdfgh now '
+  const box = { text, cursor: text.length }
+
+  expect(
+    cycleTarget(box, proseWords(box), lexiconOf(['asdfgh\tbad\t']), null),
+  ).toBe(null)
+})
+
+test('stepping goes through each guess and back to what was typed', () => {
+  const lexicon = lexiconOf(['aceive\tbad\tactive\tachieve'])
+  const typed = { text: 'you can aceive now ', cursor: 19 }
+  const start = cycleTarget(typed, proseWords(typed), lexicon, null)
+  if (start === null) throw new Error('no word to step')
+
+  const first = advance(typed, start)
+  expect(first.box).toEqual({ text: 'you can active now ', cursor: 19 })
+
+  const second = advance(first.box, first.cycle)
+  expect(second.box).toEqual({ text: 'you can achieve now ', cursor: 20 })
+
+  const third = advance(second.box, second.cycle)
+  expect(third.box).toEqual(typed)
+  expect(third.cycle.index).toBe(-1)
+})
+
+test('the band\'s button steps the underlined word through the guesses', async ($, on) => {
+  const { screen } = engine(on)
+  await $.session.start(START)
+
+  screen.box = await edit($, type('you can aceive', ' '))
+  expect(screen.box.text).toBe('you can aceive ')
+
+  const ui = await $.ui.mount(BAND)
+  expect((await ui.find({ type: 'Text', text: /aceive/ }))?.text).toBe('aceive: ')
+  expect((await ui.find({ type: 'Text', text: /achieve/ }))?.text).toBe(
+    'active  achieve  ',
+  )
+
+  await ui.press({ key: 'next-guess' })
+  expect(screen.box).toEqual({ text: 'you can active ', cursor: 15 })
+
+  await ui.press({ key: 'next-guess' })
+  expect(screen.box).toEqual({ text: 'you can achieve ', cursor: 16 })
+
+  await ui.press({ key: 'next-guess' })
+  expect(screen.box).toEqual({ text: 'you can aceive ', cursor: 15 })
+  await ui.unmount()
+})
+
+test('the band draws nothing of the mod\'s while no word can be stepped', async ($, on) => {
+  const { screen } = engine(on)
+  await $.session.start(START)
+
+  screen.box = await edit($, type('you can achieve', ' '))
+  const ui = await $.ui.mount(BAND)
+
+  expect(await ui.find({ type: 'Button', key: 'next-guess' })).toBe(undefined)
+  await ui.unmount()
+})
+
+test('typing after a step settles the word', async ($, on) => {
+  const { screen } = engine(on)
+  await $.session.start(START)
+
+  screen.box = await edit($, type('you can aceive', ' '))
+  const ui = await $.ui.mount(BAND)
+  await ui.press({ key: 'next-guess' })
+  await ui.press({ key: 'next-guess' })
+  screen.box = await edit($, type(screen.box.text, 'm'))
+  await ui.redraw()
+
+  expect(screen.box.text).toBe('you can achieve m')
+  expect(await ui.find({ type: 'Button', key: 'next-guess' })).toBe(undefined)
+  await ui.unmount()
 })

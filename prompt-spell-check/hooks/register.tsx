@@ -1,3 +1,4 @@
+import { atom, read, update } from 'claude-code'
 import type {
   EngineInterface,
   PromptBox,
@@ -6,8 +7,11 @@ import type {
   Register,
 } from 'claude-code'
 
+import type { Target } from '../types'
 import {
+  advance,
   applyFix,
+  cycleTarget,
   finishedWord,
   parseVerdicts,
   proseWords,
@@ -15,7 +19,7 @@ import {
   underlines,
   undoFix,
 } from './spell'
-import type { Fix, Lexicon, Range, Verdict } from './spell'
+import type { Cycle, Fix, Lexicon, Range, Verdict } from './spell'
 
 type Settings = { isEnabled: boolean; ignored: Set<string> }
 
@@ -28,7 +32,21 @@ type Session = {
   /** Set when a check outlasted a key press, so typing stops waiting on it. */
   isHelperSlow: boolean
   lastFix: { fix: Fix; box: PromptBox } | null
+  /** The word being stepped through its guesses, until the text is edited. */
+  cycle: Cycle | null
+  /** What the band was last told to draw, so it is told only of a change. */
+  banded: string
 }
+
+// What the band above the prompt draws: the word a step would change.
+const target = atom({ plugin: 'prompt-spell-check', key: 'target' } as const, null)
+
+// A mod has no key of its own in the prompt box. The band's Button borrows
+// this engine action, so the chord bound to it (ctrl+x b unless rebound)
+// presses the Button from the prompt. The action itself only runs in the
+// diff panel.
+const STEP_ACTION = 'app:cycleDiffBase'
+const STEP_CHORD = 'ctrl+x b'
 
 // Bump when helper/spellcheck.swift changes, so the old binary is not reused.
 const HELPER = 'bin/spellcheck-2'
@@ -118,6 +136,28 @@ const lexiconOf = (session: Session, settings: Settings): Lexicon => ({
   ignored: settings.ignored,
 })
 
+/** Tells the band which word a step would change in this box, if any. */
+const syncBand = async (
+  $: EngineInterface,
+  session: Session,
+  settings: Settings,
+  box: PromptBox,
+): Promise<void> => {
+  const cycle = settings.isEnabled
+    ? cycleTarget(box, proseWords(box), lexiconOf(session, settings), session.cycle)
+    : null
+  const shown: Target | null = cycle && {
+    word: cycle.original,
+    guesses: [...cycle.guesses],
+    index: cycle.index,
+  }
+  const banded = JSON.stringify(shown)
+  if (banded === session.banded) return
+
+  session.banded = banded
+  await update($, target, () => shown)
+}
+
 const repaint = async ($: EngineInterface, session: Session): Promise<void> => {
   const settings = await settingsOf($, session)
   const box = await $.prompt.read()
@@ -125,6 +165,27 @@ const repaint = async ($: EngineInterface, session: Session): Promise<void> => {
     ? underlines(proseWords(box), lexiconOf(session, settings))
     : []
   await $.prompt.paint({ text: box.text, decorations })
+  await syncBand($, session, settings, box)
+}
+
+/** One press of the band's Button: the next guess, written into the box. */
+const step = async ($: EngineInterface, session: Session): Promise<void> => {
+  const settings = await settingsOf($, session)
+  const box = await $.prompt.read()
+  const lexicon = lexiconOf(session, settings)
+  const cycle = cycleTarget(box, proseWords(box), lexicon, session.cycle)
+  if (!settings.isEnabled || cycle === null) return
+
+  const stepped = advance(box, cycle)
+  session.cycle = stepped.cycle
+  session.lastFix = null
+  await $.prompt.fill({
+    text: stepped.box.text,
+    mode: 'replace',
+    cursor: stepped.box.cursor,
+    decorations: underlines(proseWords(stepped.box), lexicon),
+  })
+  await syncBand($, session, settings, stepped.box)
 }
 
 const checkThenRepaint = async (
@@ -230,6 +291,8 @@ export const register: Register = on => {
     isHelperReady: false,
     isHelperSlow: false,
     lastFix: null,
+    cycle: null,
+    banded: 'null',
   }
 
   on('session.start', async ($, e, next) => {
@@ -239,6 +302,8 @@ export const register: Register = on => {
       argumentHint: 'on | off | add <word> | remove <word> | list',
     })
     void prepareHelper($, session)
+    // A reload keeps the session's state: start with no word on the band.
+    await update($, target, () => null)
 
     return next(e)
   })
@@ -247,10 +312,13 @@ export const register: Register = on => {
     const settings = await settingsOf($, session)
     const undoable = session.lastFix
     session.lastFix = null
+    // A step is over once the text changes; moving the cursor keeps it.
+    if (e.inputText !== '' || e.end > e.start) session.cycle = null
 
     if (settings.isEnabled && undoable && isBackspaceAt(e, undoable.box)) {
       await keepWord($, settings, undoable.fix.original)
       const box = undoFix(undoable.box, undoable.fix)
+      await syncBand($, session, settings, box)
 
       return {
         ...box,
@@ -277,6 +345,7 @@ export const register: Register = on => {
     if (unknown.length > 0) void checkThenRepaint($, session, unknown)
 
     const applied = finished ? applyFix(box, finished, lexicon) : null
+    await syncBand($, session, settings, applied?.box ?? box)
     if (applied === null) {
       return {
         ...box,
@@ -300,6 +369,9 @@ export const register: Register = on => {
   on('prompt.change', async ($, e, next) => {
     session.lastFix = null
     const settings = await settingsOf($, session)
+    // The mod's own step lands here too and is still in the box; a recalled
+    // or cleared draft is not, and `cycleTarget` then starts over.
+    await syncBand($, session, settings, e)
     if (settings.isEnabled) {
       const words = proseWords(e)
       void checkThenRepaint(
@@ -315,4 +387,31 @@ export const register: Register = on => {
   on('command.run', { command: 'prompt-spell-check' }, async ($, e) => ({
     text: await runCommand($, session, e.args),
   }))
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const shown = await read($, target)
+    if (e.props.hasSurvey || shown === null) return next(e)
+
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const row = (guesses: readonly string[]): string =>
+      guesses.map(guess => `${guess}  `).join('')
+    const current = shown.guesses[shown.index]
+    const before = row(shown.guesses.slice(0, Math.max(shown.index, 0)))
+    const after = row(shown.guesses.slice(shown.index + 1))
+
+    return (
+      <Box>
+        <Text dimColor>{`${shown.word}: ${before}`}</Text>
+        {current === undefined ? [] : [<Text color="success">{`${current}  `}</Text>]}
+        {after === '' ? [] : [<Text dimColor>{after}</Text>]}
+        <Button
+          key="next-guess"
+          label="next guess"
+          action={STEP_ACTION}
+          onPress={() => step($, session)}
+        />
+        <Text dimColor>{` ${STEP_CHORD}`}</Text>
+      </Box>
+    )
+  })
 }
