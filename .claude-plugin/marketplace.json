@@ -9,6 +9,11 @@
       "name": "prompt-spell-check",
       "source": "./prompt-spell-check",
       "description": "Underlines misspelled words in the prompt box and fixes sure typos as you type, using the macOS spell checker"
+    },
+    {
+      "name": "read-guard",
+      "source": "./read-guard",
+      "description": "Stops whole-file reads of large files, lockfiles and generated folders, and points to a search or a ranged read instead."
     }
   ]
 }

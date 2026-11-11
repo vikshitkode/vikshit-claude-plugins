@@ -1,0 +1,8 @@
+{
+  "name": "read-guard",
+  "version": "0.1.0",
+  "description": "Stops whole-file reads of large files, lockfiles and generated folders, and points to a search or a ranged read instead.",
+  "author": {
+    "name": "vikshitkode"
+  }
+}

@@ -5,3 +5,4 @@ prompt-spell-check/bin/
 # written by Claude Code when it loads a plugin from this folder
 .claude-plugin/types/
 prompt-spell-check/.claude-plugin/types/
+read-guard/.claude-plugin/types/
