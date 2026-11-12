@@ -4,6 +4,7 @@ A Claude Code mod that spell-checks the prompt box as you type, using the macOS 
 
 - A misspelled word is underlined in red once you move past it.
 - When the correction is sure, the word is replaced the moment you type a space after it, and shown in green until the next key. A correction is sure when macOS has exactly one guess (`acheive` to `achieve`), or when its first guess swaps two neighbouring letters back (`teh` to `the`).
+- If macOS answers slowly, for example on the first check after Claude Code reloads the mod, the fix lands on the next key you type instead of the space.
 - When macOS has several guesses (`aceive` could be `active` or `achieve`), the word is underlined and left as you typed it.
 - While the cursor sits at the end of a misspelled word, macOS's guesses show as suggestions under the prompt. Press Tab to put the first guess in the box. Each further Tab puts in the next guess, and after the last one your own word comes back. The arrow keys and Enter pick a guess from the list too. A half-typed word (`achiev`) gets no suggestions, because it may still become a real word.
 - Tab cannot reach a word once you type a space after it. Move the cursor back to the end of the word (Backspace or the left arrow) and the suggestions come back, or press `ctrl+x b`.

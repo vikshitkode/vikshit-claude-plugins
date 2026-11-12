@@ -24,7 +24,7 @@ import {
   undoFix,
   wordAtCursor,
 } from './spell'
-import type { Cycle, Fix, Lexicon, Range, Verdict } from './spell'
+import type { Cycle, Fix, Lexicon, Range, Verdict, Word } from './spell'
 
 type Settings = { isEnabled: boolean; ignored: Set<string> }
 
@@ -36,6 +36,8 @@ type Session = {
   isHelperReady: boolean
   /** Set when a check outlasted a key press, so typing stops waiting on it. */
   isHelperSlow: boolean
+  /** A word finished before its check answered: the next key fixes it. */
+  pending: Word | null
   lastFix: { fix: Fix; box: PromptBox } | null
   /** The word being stepped through its guesses, until the text is edited. */
   cycle: Cycle | null
@@ -211,16 +213,21 @@ const checkThenRepaint = async (
   }
 }
 
+/**
+ * Waits for a word's check as long as a key may. A slower check is not
+ * killed: its answer is kept for the pending fix.
+ */
 const checkWhileTyping = async (
   $: EngineInterface,
   session: Session,
   word: string,
 ): Promise<void> => {
-  try {
-    await check($, session, [word], TYPING_WAIT_MS)
-  } catch {
-    session.isHelperSlow = true
-  }
+  const checked = check($, session, [word], BACKGROUND_WAIT_MS).then(
+    () => true,
+    () => true,
+  )
+  const timedOut = $.clock.sleep(TYPING_WAIT_MS).then(() => false)
+  if (!(await Promise.race([checked, timedOut]))) session.isHelperSlow = true
 }
 
 const keepWord = async (
@@ -299,6 +306,7 @@ export const register: Register = on => {
     helper: null,
     isHelperReady: false,
     isHelperSlow: false,
+    pending: null,
     lastFix: null,
     cycle: null,
     offered: null,
@@ -357,7 +365,24 @@ export const register: Register = on => {
     const unknown = unchecked(words, lexicon)
     if (unknown.length > 0) void checkThenRepaint($, session, unknown)
 
-    const applied = finished ? applyFix(box, finished, lexicon) : null
+    // A late fix waits for a typed key, so a Backspace right after it still
+    // means "put my word back".
+    const pending = session.pending
+    const candidate =
+      finished ??
+      (typed
+        ? words.find(
+            word =>
+              word.isComplete &&
+              word.start === pending?.start &&
+              word.text === pending.text,
+          )
+        : undefined)
+    if (typed) {
+      session.pending =
+        candidate && unchecked([candidate], lexicon).length > 0 ? candidate : null
+    }
+    const applied = candidate ? applyFix(box, candidate, lexicon) : null
     await syncBand($, session, settings, applied?.box ?? box)
     if (applied === null) {
       return {

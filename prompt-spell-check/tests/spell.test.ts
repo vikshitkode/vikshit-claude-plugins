@@ -28,9 +28,21 @@ const HELPER: Record<string, string> = {
 
 type Stored = Record<string, unknown>
 
-const engine = (on: On, hasHelper = true) => {
+// The test runner has timers; the mod's typings leave them out.
+declare const setTimeout: (run: (value?: unknown) => void, ms: number) => unknown
+
+// `isHelperLate`: each check answers only once the test calls `answer()`,
+// after the typing wait has run out.
+const engine = (on: On, hasHelper = true, isHelperLate = false) => {
   const stored: Stored = {}
   const spawned: string[][] = []
+  let answer = (): void => {}
+  const answered = new Promise<void>(resolve => {
+    answer = resolve
+  })
+  on('clock.sleep', () =>
+    isHelperLate ? { value: undefined } : new Promise<never>(() => {}),
+  )
   // The box as the editor holds it: a test sets it to what an edit answered.
   const screen: { box: PromptBox } = { box: { text: '', cursor: 0 } }
   on('command.register', () => ({ value: { command: 'prompt-spell-check' } }))
@@ -54,8 +66,9 @@ const engine = (on: On, hasHelper = true) => {
   on('prompt.paint', () => ({
     value: { isPainted: true, text: '', cursor: 0 },
   }))
-  on('process.run', (_, e) => {
+  on('process.run', async (_, e) => {
     spawned.push([...e.argv])
+    if (isHelperLate && e.argv[0] !== 'swiftc') await answered
     const words = (e.init?.stdin ?? '').split('\n')
     const stdout = words
       .map(word => `${word}\t${HELPER[word] ?? 'ok'}\n`)
@@ -80,7 +93,7 @@ const engine = (on: On, hasHelper = true) => {
     return screen.box
   })
 
-  return { stored, spawned, screen }
+  return { stored, spawned, screen, answer }
 }
 
 // The engine raises `prompt.edit` on the test's `$`, but this build's typings
@@ -180,6 +193,30 @@ test('a sure typo is fixed when the word is finished', async ($, on) => {
 
   expect(box.text).toBe('you can achieve ')
   expect(box.cursor).toBe(16)
+})
+
+test('a sure typo whose check answers late is fixed at the next key', async ($, on) => {
+  const { answer } = engine(on, true, true)
+  await $.session.start(START)
+
+  const finished = await edit($, type('you can acheive', ' '))
+  expect(finished.text).toBe('you can acheive ')
+
+  answer()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  const next = await edit($, type(finished.text, 'i'))
+  expect(next.text).toBe('you can achieve i')
+  expect(next.cursor).toBe(17)
+})
+
+test('a late fix waits for a typed key, not a Backspace', async ($, on) => {
+  const { answer } = engine(on, true, true)
+  await $.session.start(START)
+
+  const finished = await edit($, type('you can acheive', ' '))
+  answer()
+  const erased = await edit($, backspace(finished.text))
+  expect(erased.text).toBe('you can acheive')
 })
 
 test('a typo with several guesses is underlined, not replaced', async ($, on) => {
