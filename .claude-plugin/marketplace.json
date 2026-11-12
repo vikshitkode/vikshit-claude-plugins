@@ -14,6 +14,11 @@
       "name": "read-guard",
       "source": "./read-guard",
       "description": "Stops whole-file reads of large files, lockfiles and generated folders, and points to a search or a ranged read instead."
+    },
+    {
+      "name": "vikshit-personal-theme",
+      "source": "./vikshit-personal-theme",
+      "description": "A theme on the dark base that swaps the blue accents for Claude orange and gives prompt lines orange text on a dark orange band."
     }
   ]
 }
