@@ -54,6 +54,8 @@ const target = atom({ plugin: 'prompt-spell-check', key: 'target' } as const, nu
 // diff panel.
 const STEP_ACTION = 'app:cycleDiffBase'
 const STEP_CHORD = 'ctrl+x b'
+// Tab reaches only the typeahead, which asks about the word at the cursor.
+const TAB_HINT = '· cursor to its end, then Tab · or '
 
 // Bump when helper/spellcheck.swift changes, so the old binary is not reused.
 const HELPER = 'bin/spellcheck-3'
@@ -472,6 +474,7 @@ export const register: Register = on => {
         <Text dimColor>{`${shown.word}: ${before}`}</Text>
         {current === undefined ? [] : [<Text color="success">{`${current}  `}</Text>]}
         {after === '' ? [] : [<Text dimColor>{after}</Text>]}
+        <Text dimColor>{TAB_HINT}</Text>
         <Button
           key="next-guess"
           label="next guess"
