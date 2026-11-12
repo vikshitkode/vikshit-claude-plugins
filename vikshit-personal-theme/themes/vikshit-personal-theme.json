@@ -1,0 +1,23 @@
+{
+  "name": "vikshit-personal-theme",
+  "base": "dark",
+  "overrides": {
+    "suggestion": "rgb(215,119,87)",
+    "permission": "rgb(215,119,87)",
+    "permissionShimmer": "rgb(235,159,127)",
+    "claudeBlue_FOR_SYSTEM_SPINNER": "rgb(215,119,87)",
+    "claudeBlueShimmer_FOR_SYSTEM_SPINNER": "rgb(235,159,127)",
+    "ide": "rgb(215,119,87)",
+    "remember": "rgb(215,119,87)",
+    "professionalBlue": "rgb(215,119,87)",
+    "blue_FOR_SUBAGENTS_ONLY": "rgb(240,170,120)",
+    "briefLabelYou": "rgb(245,180,140)",
+    "rate_limit_fill": "rgb(215,119,87)",
+    "rate_limit_empty": "rgb(100,62,48)",
+    "selectionBg": "rgb(110,56,36)",
+    "memoryBackgroundColor": "rgb(70,60,55)",
+    "text": "rgb(245,149,117)",
+    "userMessageBackground": "rgb(64,26,8)",
+    "userMessageBackgroundHover": "rgb(84,36,12)"
+  }
+}

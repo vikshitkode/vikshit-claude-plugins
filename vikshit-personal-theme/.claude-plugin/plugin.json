@@ -1,0 +1,8 @@
+{
+  "name": "vikshit-personal-theme",
+  "version": "0.1.0",
+  "description": "A Claude Code theme on the dark base that swaps the blue accents for Claude orange and gives prompt lines orange text on a dark orange band.",
+  "author": {
+    "name": "vikshitkode"
+  }
+}
