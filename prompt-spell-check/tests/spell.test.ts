@@ -1,12 +1,23 @@
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
-import type { On, PromptBox, PromptEditInput, PromptEditResult } from 'claude-code'
+import type {
+  On,
+  PromptAutocompleteInput,
+  PromptAutocompleteResult,
+  PromptBox,
+  PromptEditInput,
+  PromptEditResult,
+  PromptSubmitInput,
+  PromptSubmitResult,
+} from 'claude-code'
 
-import { advance, cycleTarget, parseVerdicts, proseWords } from '../hooks/spell'
+import { advance, cycleTarget, parseVerdicts, proseWords, rowsOf } from '../hooks/spell'
 import type { Lexicon } from '../hooks/spell'
 
-// What the helper answers: `bad`, then macOS's guesses, best first.
+// What the helper answers: `bad` (or `part` for a word that begins a longer
+// one), then macOS's guesses, best first.
 const HELPER: Record<string, string> = {
+  achiev: 'part\tachieve',
   acheive: 'bad\tachieve',
   aceive: 'bad\tactive\tachieve',
   pstack: 'bad\tstack',
@@ -38,6 +49,8 @@ const engine = (on: On, hasHelper = true) => {
 
     return { isFilled: true }
   })
+  on('prompt.autocomplete', () => ({ suggestions: [] }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
   on('prompt.paint', () => ({
     value: { isPainted: true, text: '', cursor: 0 },
   }))
@@ -76,6 +89,31 @@ type RaiseEdit = { edit: (e: PromptEditInput) => Promise<PromptEditResult> }
 
 const edit = ($: Engine, e: PromptEditInput): Promise<PromptEditResult> =>
   ($.prompt as unknown as RaiseEdit).edit(e)
+
+// The same for the typeahead's question and for the person's own Enter.
+type RaisePrompt = {
+  autocomplete: (e: PromptAutocompleteInput) => Promise<PromptAutocompleteResult>
+  submit: (e: PromptSubmitInput) => Promise<PromptSubmitResult>
+}
+
+const rows = async ($: Engine, text: string): Promise<string[]> => {
+  const start = text.search(/\S+$/)
+  const asked = await ($.prompt as unknown as RaisePrompt).autocomplete({
+    text,
+    cursor: text.length,
+    token: text.slice(start),
+    start,
+  })
+
+  return asked.suggestions.map(row => row.text)
+}
+
+const enter = ($: Engine, text: string): Promise<PromptSubmitResult> =>
+  ($.prompt as unknown as RaisePrompt).submit({
+    text,
+    wait: false,
+    origin: { kind: 'composer' },
+  })
 
 const START = { cwd: '/', surface: 'terminal', isInteractive: true } as const
 const ORIGIN = { kind: 'composer' } as const
@@ -328,9 +366,94 @@ const lexiconOf = (lines: string[]): Lexicon => ({
 
 test('the helper\'s guesses are kept with the verdict', () => {
   expect(parseVerdicts('aceive\tbad\tactive\tachieve\nasdfgh\tbad\t')).toEqual([
-    ['aceive', { kind: 'misspelled', fix: null, guesses: ['active', 'achieve'] }],
-    ['asdfgh', { kind: 'misspelled', fix: null, guesses: [] }],
+    [
+      'aceive',
+      { kind: 'misspelled', fix: null, guesses: ['active', 'achieve'], isPartial: false },
+    ],
+    ['asdfgh', { kind: 'misspelled', fix: null, guesses: [], isPartial: false }],
   ])
+})
+
+test('a misspelled word that begins a longer one is marked partial', () => {
+  expect(parseVerdicts('achiev\tpart\tachieve')).toEqual([
+    ['achiev', { kind: 'misspelled', fix: 'achieve', guesses: ['achieve'], isPartial: true }],
+  ])
+})
+
+test('the typeahead rows put the next choice first, then what was typed', () => {
+  const cycle = { start: 0, original: 'tets', guesses: ['lets', 'test', 'gets'], index: -1 }
+
+  expect(rowsOf(cycle)).toEqual(['lets', 'test', 'gets'])
+  expect(rowsOf({ ...cycle, index: 0 })).toEqual(['test', 'gets', 'tets'])
+  expect(rowsOf({ ...cycle, index: 2 })).toEqual(['tets', 'lets', 'test'])
+})
+
+test('the typeahead offers guesses for the misspelled word at the cursor', async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+
+  expect(await rows($, 'you can aceive')).toEqual(['active', 'achieve'])
+  expect(await rows($, 'you can (aceive')).toEqual(['(active', '(achieve'])
+  expect(await rows($, 'you can achieve')).toEqual([])
+  expect(await rows($, 'you can achiev')).toEqual([])
+  expect(await rows($, 'see `aceive')).toEqual([])
+})
+
+test('each Tab takes the next guess, and after the last what was typed', async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+
+  expect(await rows($, 'you can aceive')).toEqual(['active', 'achieve'])
+  expect(await rows($, 'you can active')).toEqual(['achieve', 'aceive'])
+  expect(await rows($, 'you can achieve')).toEqual(['aceive', 'active'])
+  expect(await rows($, 'you can aceive')).toEqual(['active', 'achieve'])
+})
+
+test('Enter after taking a guess keeps it, and the next Enter sends', async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+
+  await rows($, 'you can aceive')
+  await rows($, 'you can achieve')
+
+  expect(await enter($, 'you can achieve')).toEqual({
+    drop: 'Kept "achieve". Press Enter again to send.',
+  })
+  expect(await enter($, 'you can achieve')).toEqual({ text: 'you can achieve' })
+})
+
+test('Enter sends when the guesses were shown but none was taken', async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+
+  await rows($, 'you can aceive')
+
+  expect(await enter($, 'you can aceive')).toEqual({ text: 'you can aceive' })
+})
+
+test('a word typed by hand is not taken for a picked guess', async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+
+  await rows($, 'you can aceive')
+  await edit($, backspace('you can aceive'))
+  await rows($, 'you can active')
+
+  expect(await enter($, 'you can active')).toEqual({ text: 'you can active' })
+})
+
+test('Enter after a step with the band\'s button keeps the word', async ($, on) => {
+  const { screen } = engine(on)
+  await $.session.start(START)
+
+  screen.box = await edit($, type('you can aceive', ' '))
+  const ui = await $.ui.mount(BAND)
+  await ui.press({ key: 'next-guess' })
+
+  expect(await enter($, screen.box.text)).toEqual({
+    drop: 'Kept "active". Press Enter again to send.',
+  })
+  await ui.unmount()
 })
 
 test('the word to step is the underlined one nearest before the cursor', () => {

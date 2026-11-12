@@ -8,6 +8,8 @@ export type Verdict =
       fix: string | null
       /** macOS's guesses, best first. */
       guesses: readonly string[]
+      /** True when the word begins a longer one: it may be half typed. */
+      isPartial: boolean
     }
 
 export type Lexicon = {
@@ -154,7 +156,7 @@ export const applyFix = (
 export const undoFix = (box: PromptBox, fix: Fix): PromptBox =>
   swap(box, fix.start, fix.fixed, fix.original)
 
-const shownWord = (cycle: Cycle): string =>
+export const shownWord = (cycle: Cycle): string =>
   cycle.guesses[cycle.index] ?? cycle.original
 
 /**
@@ -247,17 +249,70 @@ const sureFix = (word: string, guesses: readonly string[]): string | null => {
   return second === undefined || isSwap(word, first) ? first : null
 }
 
-/** Parses the helper's lines: `<word>\tok` or `<word>\tbad\t<guess>\t<guess>...`. */
+/**
+ * Parses the helper's lines: `<word>\tok`, or `<word>\tbad` then its guesses.
+ * `part` in place of `bad` marks a misspelled word that begins a longer one.
+ */
 export const parseVerdicts = (stdout: string): [string, Verdict][] =>
   stdout.split('\n').flatMap((line): [string, Verdict][] => {
     const [word, state, ...guesses] = line.split('\t')
     if (!word) return []
     if (state === 'ok') return [[word, { kind: 'ok' }]]
-    if (state === 'bad') {
+    if (state === 'bad' || state === 'part') {
       const real = guesses.filter(guess => guess !== '')
 
-      return [[word, { kind: 'misspelled', fix: sureFix(word, real), guesses: real }]]
+      return [
+        [
+          word,
+          {
+            kind: 'misspelled',
+            fix: sureFix(word, real),
+            guesses: real,
+            isPartial: state === 'part',
+          },
+        ],
+      ]
     }
 
     return []
   })
+
+/** The prose word that ends at the cursor inside the token starting at `start`. */
+export const wordAtCursor = (box: PromptBox, start: number): Word | undefined =>
+  proseWords(box).find(word => word.end === box.cursor && word.start >= start)
+
+/**
+ * `cycle` with its index set to the choice `word` shows, when `word` stands
+ * where the cycle's word does and is one of its choices; else null.
+ */
+export const follow = (cycle: Cycle | null, word: Word): Cycle | null => {
+  if (cycle === null || cycle.start !== word.start) return null
+  if (word.text === cycle.original) return { ...cycle, index: -1 }
+
+  const index = cycle.guesses.indexOf(word.text)
+
+  return index < 0 ? null : { ...cycle, index }
+}
+
+/**
+ * The guesses to offer for a word the cursor ends: a misspelled one that does
+ * not begin a longer word, so a word half typed is not offered any.
+ */
+export const offer = (word: Word, lexicon: Lexicon): Cycle | null => {
+  const verdict = verdictOf(word, lexicon)
+  if (verdict?.kind !== 'misspelled' || verdict.isPartial) return null
+  if (verdict.guesses.length === 0) return null
+
+  return { start: word.start, original: word.text, guesses: verdict.guesses, index: -1 }
+}
+
+/**
+ * The typeahead's rows for a cycle, the next choice first: Tab takes the first
+ * row, so each press steps on, and after the last guess comes what was typed.
+ */
+export const rowsOf = (cycle: Cycle): string[] => {
+  const choices = [cycle.original, ...cycle.guesses]
+  const shown = cycle.index + 1
+
+  return [...choices.slice(shown + 1), ...choices.slice(0, shown)]
+}

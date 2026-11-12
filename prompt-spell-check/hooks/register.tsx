@@ -13,11 +13,16 @@ import {
   applyFix,
   cycleTarget,
   finishedWord,
+  follow,
+  offer,
   parseVerdicts,
   proseWords,
+  rowsOf,
+  shownWord,
   unchecked,
   underlines,
   undoFix,
+  wordAtCursor,
 } from './spell'
 import type { Cycle, Fix, Lexicon, Range, Verdict } from './spell'
 
@@ -34,6 +39,8 @@ type Session = {
   lastFix: { fix: Fix; box: PromptBox } | null
   /** The word being stepped through its guesses, until the text is edited. */
   cycle: Cycle | null
+  /** The word whose guesses the typeahead shows, before one is taken. */
+  offered: Cycle | null
   /** What the band was last told to draw, so it is told only of a change. */
   banded: string
 }
@@ -49,7 +56,7 @@ const STEP_ACTION = 'app:cycleDiffBase'
 const STEP_CHORD = 'ctrl+x b'
 
 // Bump when helper/spellcheck.swift changes, so the old binary is not reused.
-const HELPER = 'bin/spellcheck-2'
+const HELPER = 'bin/spellcheck-3'
 // Longer inserts are pastes: they are underlined, never rewritten.
 const LONGEST_TYPED = 16
 // A check runs in about 20 ms. Past this the key stops waiting for it.
@@ -292,6 +299,7 @@ export const register: Register = on => {
     isHelperSlow: false,
     lastFix: null,
     cycle: null,
+    offered: null,
     banded: 'null',
   }
 
@@ -313,7 +321,10 @@ export const register: Register = on => {
     const undoable = session.lastFix
     session.lastFix = null
     // A step is over once the text changes; moving the cursor keeps it.
-    if (e.inputText !== '' || e.end > e.start) session.cycle = null
+    if (e.inputText !== '' || e.end > e.start) {
+      session.cycle = null
+      session.offered = null
+    }
 
     if (settings.isEnabled && undoable && isBackspaceAt(e, undoable.box)) {
       await keepWord($, settings, undoable.fix.original)
@@ -382,6 +393,63 @@ export const register: Register = on => {
     }
 
     return next(e)
+  })
+
+  // Taking a row writes it over the token and asks again for the new token,
+  // so answering the next choice first lets each Tab step the word on.
+  on('prompt.autocomplete', async ($, e, next) => {
+    const rows = await next(e)
+    const settings = await settingsOf($, session)
+    const box = { text: e.text, cursor: e.cursor }
+    const word = settings.isEnabled ? wordAtCursor(box, e.start) : undefined
+    if (word === undefined) return rows
+
+    const taken = follow(session.offered, word)
+    let cycle =
+      follow(session.cycle, word) ?? (taken !== null && taken.index >= 0 ? taken : null)
+    if (cycle !== null) {
+      session.cycle = cycle
+      session.offered = null
+      await syncBand($, session, settings, box)
+    } else {
+      if (!session.isHelperSlow) await checkWhileTyping($, session, word.text)
+      cycle = offer(word, lexiconOf(session, settings))
+      session.offered = cycle
+    }
+    if (cycle === null) return rows
+
+    const lead = e.text.slice(e.start, word.start)
+
+    return {
+      suggestions: [
+        ...rows.suggestions,
+        ...rowsOf(cycle).map(choice => ({
+          text: lead + choice,
+          label: choice,
+          description: choice === cycle.original ? 'as you typed it' : 'spelling',
+        })),
+      ],
+    }
+  })
+
+  // Enter right after picking a guess keeps it in the box instead of sending.
+  on('prompt.submit', async ($, e, next) => {
+    const cycle = session.cycle
+    if (
+      e.origin.kind !== 'composer' ||
+      e.command !== undefined ||
+      cycle === null ||
+      !e.text.startsWith(shownWord(cycle), cycle.start)
+    ) {
+      return next(e)
+    }
+
+    session.cycle = null
+    session.offered = null
+    const settings = await settingsOf($, session)
+    await syncBand($, session, settings, { text: e.text, cursor: e.text.length })
+
+    return { drop: `Kept "${shownWord(cycle)}". Press Enter again to send.` }
   })
 
   on('command.run', { command: 'prompt-spell-check' }, async ($, e) => ({

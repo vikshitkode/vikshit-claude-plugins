@@ -3,6 +3,7 @@ import AppKit
 // Reads one word per line on stdin. Writes one line per word:
 //   <word>\tok
 //   <word>\tbad\t<guess>\t<guess>...   macOS's guesses, best first, at most 5
+//   <word>\tpart\t<guess>...            the same, for a word that begins a longer one
 let checker = NSSpellChecker.shared
 // A nil language lets macOS match a word against every installed dictionary,
 // which accepts "teh" and "wich". The system's main spelling language does not.
@@ -27,7 +28,11 @@ for line in input.split(whereSeparator: { $0.isNewline }) {
     let guesses = checker.guesses(
         forWordRange: whole, in: word, language: language,
         inSpellDocumentWithTag: 0) ?? []
-    output += "\(word)\tbad\t\(guesses.prefix(5).joined(separator: "\t"))\n"
+    let completions = checker.completions(
+        forPartialWordRange: whole, in: word, language: language,
+        inSpellDocumentWithTag: 0) ?? []
+    let state = completions.isEmpty ? "bad" : "part"
+    output += "\(word)\t\(state)\t\(guesses.prefix(5).joined(separator: "\t"))\n"
 }
 
 FileHandle.standardOutput.write(Data(output.utf8))

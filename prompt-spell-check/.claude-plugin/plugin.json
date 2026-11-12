@@ -1,6 +1,6 @@
 {
   "name": "prompt-spell-check",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Underlines misspelled words in the prompt box and fixes sure typos as you type, using the macOS spell checker",
   "author": {
     "name": "vikshitkode"
